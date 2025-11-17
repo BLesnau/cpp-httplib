@@ -1,22 +1,27 @@
 #[[
 	Build options:
-	* BUILD_SHARED_LIBS (default off) builds as a shared library (if HTTPLIB_COMPILE is ON)
+	* Standard BUILD_SHARED_LIBS is supported and sets HTTPLIB_SHARED default value.
 	* HTTPLIB_USE_OPENSSL_IF_AVAILABLE (default on)
 	* HTTPLIB_USE_ZLIB_IF_AVAILABLE (default on)
 	* HTTPLIB_USE_BROTLI_IF_AVAILABLE (default on)
+	* HTTPLIB_USE_ZSTD_IF_AVAILABLE (default on)
 	* HTTPLIB_REQUIRE_OPENSSL (default off)
 	* HTTPLIB_REQUIRE_ZLIB (default off)
 	* HTTPLIB_REQUIRE_BROTLI (default off)
+	* HTTPLIB_REQUIRE_ZSTD (default off)
 	* HTTPLIB_USE_CERTS_FROM_MACOSX_KEYCHAIN (default on)
+	* HTTPLIB_USE_NON_BLOCKING_GETADDRINFO (default on)
+	* HTTPLIB_USE_WINDOWS_AUTOMATIC_ROOT_CERTIFICATES_UPDATE (default on)
 	* HTTPLIB_COMPILE (default off)
 	* HTTPLIB_INSTALL (default on)
+	* HTTPLIB_SHARED (default off) builds as a shared library (if HTTPLIB_COMPILE is ON)
 	* HTTPLIB_TEST (default off)
 	* BROTLI_USE_STATIC_LIBS - tells Cmake to use the static Brotli libs (only works if you have them installed).
 	* OPENSSL_USE_STATIC_LIBS - tells Cmake to use the static OpenSSL libs (only works if you have them installed).
 
 	-------------------------------------------------------------------------------
 
-	After installation with Cmake, a find_package(httplib COMPONENTS OpenSSL ZLIB Brotli) is available.
+	After installation with Cmake, a find_package(httplib COMPONENTS OpenSSL ZLIB Brotli zstd) is available.
 	This creates a httplib::httplib target (if found and if listed components are supported).
 	It can be linked like so:
 
@@ -45,7 +50,9 @@
 	* HTTPLIB_IS_USING_OPENSSL - a bool for if OpenSSL support is enabled.
 	* HTTPLIB_IS_USING_ZLIB - a bool for if ZLIB support is enabled.
 	* HTTPLIB_IS_USING_BROTLI - a bool for if Brotli support is enabled.
+	* HTTPLIB_IS_USING_ZSTD - a bool for if ZSTD support is enabled.
 	* HTTPLIB_IS_USING_CERTS_FROM_MACOSX_KEYCHAIN - a bool for if support of loading system certs from the Apple Keychain is enabled.
+	* HTTPLIB_IS_USING_NON_BLOCKING_GETADDRINFO - a bool for if nonblocking getaddrinfo is enabled.
 	* HTTPLIB_IS_COMPILED - a bool for if the library is compiled, or otherwise header-only.
 	* HTTPLIB_INCLUDE_DIR - the root path to httplib's header (e.g. /usr/include).
 	* HTTPLIB_LIBRARY - the full path to the library if compiled (e.g. /usr/lib/libhttplib.so).
@@ -101,17 +108,44 @@ option(HTTPLIB_TEST "Enables testing and builds tests" OFF)
 option(HTTPLIB_REQUIRE_BROTLI "Requires Brotli to be found & linked, or fails build." OFF)
 option(HTTPLIB_USE_BROTLI_IF_AVAILABLE "Uses Brotli (if available) to enable Brotli decompression support." ON)
 option(HTTPLIB_USE_CERTS_FROM_MACOSX_KEYCHAIN "Enable feature to load system certs from the Apple Keychain." ON)
-# Defaults to static library
-option(BUILD_SHARED_LIBS "Build the library as a shared library instead of static. Has no effect if using header-only." OFF)
-if (BUILD_SHARED_LIBS AND WIN32 AND HTTPLIB_COMPILE)
-	# Necessary for Windows if building shared libs
-	# See https://stackoverflow.com/a/40743080
-	set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
+option(HTTPLIB_USE_NON_BLOCKING_GETADDRINFO "Enables the non-blocking alternatives for getaddrinfo." ON)
+option(HTTPLIB_REQUIRE_ZSTD "Requires ZSTD to be found & linked, or fails build." OFF)
+option(HTTPLIB_USE_ZSTD_IF_AVAILABLE "Uses ZSTD (if available) to enable zstd support." ON)
+option(HTTPLIB_USE_WINDOWS_AUTOMATIC_ROOT_CERTIFICATES_UPDATE "Enable automatic root certificates update on Windows." ON)
+# Defaults to static library but respects standard BUILD_SHARED_LIBS if set
+include(CMakeDependentOption)
+cmake_dependent_option(HTTPLIB_SHARED "Build the library as a shared library instead of static. Has no effect if using header-only."
+	"${BUILD_SHARED_LIBS}" HTTPLIB_COMPILE OFF
+)
+if(HTTPLIB_SHARED)
+	set(HTTPLIB_LIB_TYPE SHARED)
+	if(WIN32)
+		# Necessary for Windows if building shared libs
+		# See https://stackoverflow.com/a/40743080
+		set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
+	endif()
+else()
+	set(HTTPLIB_LIB_TYPE STATIC)
+endif()
+
+if(CMAKE_SYSTEM_NAME MATCHES "Windows")
+	if(CMAKE_SYSTEM_VERSION)
+		if(${CMAKE_SYSTEM_VERSION} VERSION_LESS "10.0.0")
+			message(SEND_ERROR "Windows ${CMAKE_SYSTEM_VERSION} or lower is not supported. Please use Windows 10 or later.")
+		endif()
+	else()
+		set(CMAKE_SYSTEM_VERSION "10.0.19041.0")
+		message(WARNING "The target is Windows but CMAKE_SYSTEM_VERSION is not set, the default system version is set to Windows 10.")
+	endif()
+endif()
+if(CMAKE_SIZEOF_VOID_P LESS 8)
+	message(WARNING "Pointer size ${CMAKE_SIZEOF_VOID_P} is not supported. Please use a 64-bit compiler.")
 endif()
 
 # Set some variables that are used in-tree and while building based on our options
 set(HTTPLIB_IS_COMPILED ${HTTPLIB_COMPILE})
 set(HTTPLIB_IS_USING_CERTS_FROM_MACOSX_KEYCHAIN ${HTTPLIB_USE_CERTS_FROM_MACOSX_KEYCHAIN})
+set(HTTPLIB_IS_USING_NON_BLOCKING_GETADDRINFO ${HTTPLIB_USE_NON_BLOCKING_GETADDRINFO})
 
 # Threads needed for <thread> on some systems, and for <pthread.h> on Linux
 set(THREADS_PREFER_PTHREAD_FLAG TRUE)
@@ -153,6 +187,30 @@ elseif(HTTPLIB_USE_BROTLI_IF_AVAILABLE)
 	set(HTTPLIB_IS_USING_BROTLI ${Brotli_FOUND})
 endif()
 
+if(HTTPLIB_REQUIRE_ZSTD)
+	find_package(zstd)
+	if(NOT zstd_FOUND)
+		find_package(PkgConfig REQUIRED)
+		pkg_check_modules(zstd REQUIRED IMPORTED_TARGET libzstd)
+		add_library(zstd::libzstd ALIAS PkgConfig::zstd)
+	endif()
+	set(HTTPLIB_IS_USING_ZSTD TRUE)
+elseif(HTTPLIB_USE_ZSTD_IF_AVAILABLE)
+	find_package(zstd QUIET)
+	if(NOT zstd_FOUND)
+		find_package(PkgConfig QUIET)
+		if(PKG_CONFIG_FOUND)
+			pkg_check_modules(zstd QUIET IMPORTED_TARGET libzstd)
+
+			if(TARGET PkgConfig::zstd)
+				add_library(zstd::libzstd ALIAS PkgConfig::zstd)
+			endif()
+		endif()
+	endif()
+	# Both find_package and PkgConf set a XXX_FOUND var
+	set(HTTPLIB_IS_USING_ZSTD ${zstd_FOUND})
+endif()
+
 # Used for default, common dirs that the end-user can change (if needed)
 # like CMAKE_INSTALL_INCLUDEDIR or CMAKE_INSTALL_DATADIR
 include(GNUInstallDirs)
@@ -183,8 +241,7 @@ if(HTTPLIB_COMPILE)
 
 	# split.py puts output in "out"
 	set(_httplib_build_includedir "${CMAKE_CURRENT_BINARY_DIR}/out")
-	# This will automatically be either static or shared based on the value of BUILD_SHARED_LIBS
-	add_library(${PROJECT_NAME} "${_httplib_build_includedir}/httplib.cc")
+	add_library(${PROJECT_NAME} ${HTTPLIB_LIB_TYPE} "${_httplib_build_includedir}/httplib.cc")
 	target_sources(${PROJECT_NAME}
 		PUBLIC
 			$<BUILD_INTERFACE:${_httplib_build_includedir}/httplib.h>
@@ -210,8 +267,8 @@ add_library(${PROJECT_NAME}::${PROJECT_NAME} ALIAS ${PROJECT_NAME})
 target_compile_features(${PROJECT_NAME} ${_INTERFACE_OR_PUBLIC} cxx_std_11)
 
 target_include_directories(${PROJECT_NAME} SYSTEM ${_INTERFACE_OR_PUBLIC}
-    $<BUILD_INTERFACE:${_httplib_build_includedir}>
-    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+	$<BUILD_INTERFACE:${_httplib_build_includedir}>
+	$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
 # Always require threads
@@ -227,6 +284,7 @@ target_link_libraries(${PROJECT_NAME} ${_INTERFACE_OR_PUBLIC}
 		$<$<BOOL:${HTTPLIB_IS_USING_BROTLI}>:Brotli::encoder>
 		$<$<BOOL:${HTTPLIB_IS_USING_BROTLI}>:Brotli::decoder>
 		$<$<BOOL:${HTTPLIB_IS_USING_ZLIB}>:ZLIB::ZLIB>
+		$<$<BOOL:${HTTPLIB_IS_USING_ZSTD}>:zstd::libzstd>
 		$<$<BOOL:${HTTPLIB_IS_USING_OPENSSL}>:OpenSSL::SSL>
 		$<$<BOOL:${HTTPLIB_IS_USING_OPENSSL}>:OpenSSL::Crypto>
 )
@@ -236,8 +294,11 @@ target_compile_definitions(${PROJECT_NAME} ${_INTERFACE_OR_PUBLIC}
 	$<$<BOOL:${HTTPLIB_NO_EXCEPTIONS}>:CPPHTTPLIB_NO_EXCEPTIONS>
 	$<$<BOOL:${HTTPLIB_IS_USING_BROTLI}>:CPPHTTPLIB_BROTLI_SUPPORT>
 	$<$<BOOL:${HTTPLIB_IS_USING_ZLIB}>:CPPHTTPLIB_ZLIB_SUPPORT>
+	$<$<BOOL:${HTTPLIB_IS_USING_ZSTD}>:CPPHTTPLIB_ZSTD_SUPPORT>
 	$<$<BOOL:${HTTPLIB_IS_USING_OPENSSL}>:CPPHTTPLIB_OPENSSL_SUPPORT>
 	$<$<AND:$<PLATFORM_ID:Darwin>,$<BOOL:${HTTPLIB_IS_USING_OPENSSL}>,$<BOOL:${HTTPLIB_IS_USING_CERTS_FROM_MACOSX_KEYCHAIN}>>:CPPHTTPLIB_USE_CERTS_FROM_MACOSX_KEYCHAIN>
+	$<$<BOOL:${HTTPLIB_USE_NON_BLOCKING_GETADDRINFO}>:CPPHTTPLIB_USE_NON_BLOCKING_GETADDRINFO>
+	$<$<AND:$<PLATFORM_ID:Windows>,$<NOT:$<BOOL:${HTTPLIB_USE_WINDOWS_AUTOMATIC_ROOT_CERTIFICATES_UPDATE}>>>:CPPHTTPLIB_DISABLE_WINDOWS_AUTOMATIC_ROOT_CERTIFICATES_UPDATE>
 )
 
 # CMake configuration files installation directory
@@ -299,9 +360,11 @@ if(HTTPLIB_INSTALL)
 	# ex: /usr/share/doc/httplib/README.md and /usr/share/licenses/httplib/LICENSE
 	install(FILES "README.md" DESTINATION "${CMAKE_INSTALL_DOCDIR}")
 	install(FILES "LICENSE" DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/${PROJECT_NAME}")
+
+	include(CPack)
 endif()
 
 if(HTTPLIB_TEST)
-    include(CTest)
-    add_subdirectory(test)
+	include(CTest)
+	add_subdirectory(test)
 endif()
